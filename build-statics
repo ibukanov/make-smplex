@@ -1,0 +1,314 @@
+#!/bin/bash
+
+# Based on http://blog.assarbad.net/20140415/fully-static-build-of-tmux-using-libc-musl-for-linux/
+
+set -e -u
+
+tmp_list=()
+
+cleanup() {
+    if [[ ${#tmp_list[@]} -ge 1 ]]; then
+	rm -rf "${tmp_list[@]}"
+    fi
+}
+
+trap cleanup EXIT
+
+build_root="/vol/build"
+archives="$build_root/download"
+forest="$build_root/forest"
+install_dir="$build_root/install"
+build_opt_dir="$build_root/build_opt"
+muslcc="$install_dir/bin/musl-gcc"
+
+binaries=(
+    tmux
+    screen
+)
+
+log() {
+    local line
+    for line in "$@"; do
+	printf '%s\n' "$line" 1>&2
+    done
+}
+
+err() {
+    log "$@"
+    exit 1
+}
+
+get_info() {
+    local name="$1"
+
+    p_name="$name"
+    p_required=()
+    p_config_args=()
+    p_executable=""
+    
+    unset p_archive_name p_archive_url p_checksum
+    case "$name" in
+	musl )
+	    p_archive_name="musl.tgz"
+	    p_archive_url="http://www.musl-libc.org/releases/musl-1.1.4.tar.gz"
+	    p_checksum="658c65ad3c3a9b281a96c5281e75720c758d91fcaae35ab987f2fdfb4f88f5cd"
+	    p_config_args=(
+		--enable-gcc-wrapper
+		--disable-shared
+		--prefix="$install_dir"
+	    )
+	    ;;
+
+	ncurses )
+	    p_archive_name="ncurses.tgz"
+	    p_archive_url="http://ftp.gnu.org/pub/gnu/ncurses/ncurses-5.9.tar.gz"
+	    p_checksum="9046298fb440324c9d4135ecea7879ffed8546dd1b58e59430ea07a4633f563b"
+	    p_config_args=(
+		--without-ada --without-cxx
+		--without-progs --without-manpages
+		--disable-db-install --without-tests
+		--with-default-terminfo-dir=/usr/share/terminfo
+		--with-terminfo-dirs="/etc/terminfo:/lib/terminfo:/usr/share/terminfo"
+		--prefix="$install_dir"
+		CC="$muslcc"
+	    )
+	    ;;
+
+	libevent2 )
+	    p_archive_name="libevent2.tgz"
+	    p_archive_url="https://github.com/downloads/libevent/libevent/libevent-2.0.21-stable.tar.gz"
+	    p_checksum="22a530a8a5ba1cb9c080cba033206b17dacd21437762155c6d30ee6469f574f5"
+	    p_config_args=(
+		--enable-static
+		--disable-shared
+		--disable-openssl
+		--prefix="$install_dir"
+		CC="$muslcc"
+	    )
+	    ;;
+
+	tmux )
+	    p_archive_name="tmux.tgz"
+	    p_archive_url="http://downloads.sourceforge.net/project/tmux/tmux/tmux-1.9/tmux-1.9a.tar.gz?r=&use_mirror=heanet"
+	    p_checksum="c5e3b22b901cf109b20dab54a4a651f0471abd1f79f6039d79b250d21c2733f5"
+	    p_required=(ncurses libevent2)
+	    p_config_args=(
+		--enable-static
+		--prefix="$install_dir"
+		CC="$muslcc"
+		CPPFLAGS="-I$install_dir/include -I$install_dir/include/ncurses"
+		LDFLAGS="-L$install_dir/lib"
+		#LIBS=-lncurses
+	    )
+	    p_executable="$name"
+	    ;;
+
+	screen )
+	    p_archive_name="screen.tgz"
+	    p_archive_url="http://ftp.gnu.org/gnu/screen/screen-4.2.1.tar.gz"
+	    p_checksum="5468545047e301d2b3579f9d9ce00466d14a7eec95ce806e3834a3d6b0b9b080"
+	    p_required=(ncurses)
+	    p_config_args=(
+		--prefix="$install_dir"
+		--enable-colors256
+		--disable-socket-dir
+		CC="$muslcc"
+		CPPFLAGS="-I$install_dir/include"
+		LDFLAGS="-L$install_dir/lib"
+	    )
+	    p_executable="$name"
+	    ;;
+
+	* )  err "unknown package name - $name" ;;
+    esac
+}
+
+declare -A recursion_checks
+
+run_with_info() {
+    local cmd="$1" name
+    shift
+
+    recursion_checks=()
+    for name in "$@"; do
+	run_one_with_info "$cmd" "$name"
+    done
+    
+}
+
+run_one_with_info() {
+    local cmd="$1" name="$2" required
+
+    if [[ -n "${recursion_checks["$name"]-}" ]]; then
+	return
+    fi
+    recursion_checks["$name"]=1
+
+    run_one_with_info "$cmd" musl 
+
+    get_info "$name"
+    if [[ ${#p_required[@]} -ne 0 ]]; then
+	for required in "${p_required[@]}"; do
+	    run_one_with_info "$cmd" "$required"
+	done
+
+	# get info again as the above recurssive call overwrites the globals
+	get_info "$name"
+    fi
+
+    "$cmd" "$name"
+}
+
+
+get_checksum() {
+    local path="$1" sum ignore
+    read sum ignore < <(sha256sum "$path")
+    printf %s "$sum"
+}
+
+failed_fetch=()
+
+fetch_source() {
+    local path messages
+
+    path="$archives/$p_archive_name"
+    if [[ -f "$path" && "$(get_checksum "$path")" == "$p_checksum" ]]; then
+	log "Using already downloaded $p_archive_name"
+	return
+    fi
+
+    log "Fetching $path from $p_archive_url"
+    while true; do
+	log ""
+	curl -L -o "$path" "$p_archive_url" || break
+	log ""
+	if [[ ! -f "$path" ]]; then
+	    log "failed to create $path"
+	    break
+	fi
+	if [[ ! -s "$path" ]]; then
+	    log "$path is empty"
+	    break
+	fi
+	if [[ "$(get_checksum "$path")" != "$p_checksum" ]]; then
+	    log "checksum mismatch for $path"
+	    break
+	fi
+	return
+    done
+    failed_fetch+=("$p_name")
+}
+
+
+build_source() {
+    local dir prefix config_args_str i old_config_args
+
+    dir="$forest/$p_name"
+
+    config_args_str="configure"
+    for i in "${p_config_args[@]}"; do
+	config_args_str+=" $(printf %q "$i")"
+    done
+    
+    if [[ -f "$build_opt_dir/$p_name" ]]; then
+	if [[ "$(< "$build_opt_dir/$p_name")" == "$config_args_str" ]]; then
+	    log "$p_name is already build"
+	    return 0
+	fi
+    fi
+
+    log "unpacking $p_name"
+    rm -rf "$dir"
+    mkdir "$dir"
+    tar --strip-components=1 -C "$dir" -xzf "$archives/$p_archive_name"
+
+    log "building $p_name"
+
+    (cd "$dir" && ./configure "${p_config_args[@]}" && make && make install) 1>&2
+
+    printf '%s\n' "$config_args_str" > "$build_opt_dir/$p_name"
+
+    log "$p_name is successfully built"
+}
+
+print_ready_executables() {
+    local name path
+    for name in "${binaries[@]}"; do
+	get_info "$name"
+	path="$install_dir/bin/$p_executable"
+	if [[ -x "$path" ]]; then
+	    printf "%s\n" "$path"
+	fi
+    done
+}
+
+run_setup() {
+    local dir
+
+    mkdir -p "$build_root"
+    for dir in "$archives" "$forest" "$install_dir" "$build_opt_dir" ; do
+	mkdir -p "$dir"
+    done
+}
+
+if [[ "$UID" == 0 ]]; then
+    if [[ ! -d /vol ]]; then
+	err "/vol volume to store build binaries does not exist"
+    fi
+    if [[ ! -d "$build_root" ]]; then
+	tmp="$(mktemp -d "$build_root.XXXXXXXXXX")"
+	tmp_list+=("$tmp")
+	chown user:user "$tmp"
+	chmod 770 "$tmp"
+	mv "$tmp" "$build_root"
+    fi
+
+    built_binaries="$(sudo -u user -H "$0" "$@")"
+    if [[ -n "$built_binaries" ]]; then
+	xargs install -t /vol/bin <<< "$built_binaries"
+    fi
+    exit
+fi
+
+build_all=""
+usage_error=""
+
+bad_usage() {
+    log "$@"
+    usage_error=1
+}
+
+while getopts as opt; do
+    case "$opt" in
+	a ) build_all=1;;
+	* ) usage_error=1 ;;
+    esac
+done
+shift $(($OPTIND - 1))
+
+if [[ -n "$build_all" ]]; then
+    [[ $# -eq 0 ]] || bad_usage "unexpected argument"
+else
+    [[ $# -ne 0 ]] || bad_usage "list of binaried to build must be given"
+fi
+
+[[ -z "$usage_error" ]] || err "Try $0 -h for usage"
+
+
+run_setup
+
+build_list=()
+if [[ -n "$build_all" ]]; then
+    build_list+=("${binaries[@]}")
+else
+    build_list+=("$@")
+fi
+
+run_with_info fetch_source "${build_list[@]}"
+if [[ ${#failed_fetch[@]} -ne 0 ]]; then
+    err "" "Failed to download:" "${failed_fetch[@]}"
+fi
+
+run_with_info build_source "${build_list[@]}"
+
+print_ready_executables
