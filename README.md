@@ -14,7 +14,7 @@ Run it with host volumes for storage and resulting binaries:
 ```
 docker run -ti --rm -v /vol/smplex:/vol -v /opt/bin:/vol/bin make-smplex screen tmux
 ```
-If successfull, this puts statically build `screen` and `tmux` under /opt/bin directory. If not, like when network connection to the servers with binaries is down, running the command again will resume from the point where it failed. If you need just one of multiplexers, drop other names from the command line.
+If successfull, this puts statically build `screen` and `tmux` under /opt/bin directory. If not, like when network connection to the servers with sources for the binaries and their dependent libraries is down, running the command again will resume from the point where it failed. If you need just one of multiplexers, drop other name from the command line.
 
 Using under CoreOS
 ------------------
