@@ -12,32 +12,11 @@ docker build -t make-smplex directory
 ```
 Run it with host volumes for storage and resulting binaries:
 ```
-docker run -ti --rm -v /vol/smplex:/vol /opt/bin:/vol/bin make-smplex screen tmux
+docker run -ti --rm -v /vol/smplex:/vol -v /opt/bin:/vol/bin make-smplex screen tmux
 ```
-If successfull, this puts statically build `screen` and `tmux` under /opt/bin directory. If not, like when network connection to the servers with binaries is down, running the command again will resume from the point where it failed.
+If successfull, this puts statically build `screen` and `tmux` under /opt/bin directory. If not, like when network connection to the servers with binaries is down, running the command again will resume from the point where it failed. If you need just one of multiplexers, drop other names from the command line.
 
 Using under CoreOS
 ------------------
 
-Just running `ssh -t host /opt/bin/tmux` under CoreOS will terminate tmux process when ssh connection terminates defeating the purpose of a persistent multiplexor. To workaround use a script like the following to connect into tmux session:
-```
-#!/bin/sh
-
-host="$1"
-shift
-what='\
-if ! /opt/bin/tmux list-sessions > /dev/null 2>&1; then
-    systemctl is-active -q "tmux-$USER" 2>/dev/null || \
-        sudo systemd-run --uid $UID --unit "tmux-$USER" --service-type=forking /opt/bin/tmux new-session -d
-    i=0
-    while ! /opt/bin/tmux list-sessions > /dev/null 2>&1 && test $i -lt 20; do
-        sleep 0.05
-        i=$(($i + 1))
-    done
-fi
-exec /opt/bin/tmux attach'
-
-exec ssh -t "$host" "$what"
-```
-
-This attaches the current terminal to a tmux run as a systemd service.
+Running `screen` or `tmux` under CoreOS from a ssh shell will terminate the multiplexer daemon process when the ssh connection terminates defeating the purpose of a persistent multiplexer. To workaround this the container provides together with the binaries the helper commands `screen-resume` and `tmux-attach` that start the multiplexer as a systemd service before resuming the screen session or attaching to tmux manager. So to login into, say, a `tmux` session on a CoreOS VM, just invoke `ssh -t core@vm-name tmux-attach`.

@@ -38,6 +38,32 @@ err() {
     exit 1
 }
 
+write_file() {
+    local mode=644 OPTIND opt
+
+    write_file_update=''
+    while getopts eLl:m:o: opt; do
+	case "$opt" in
+	    m ) mode="$OPTARG";;
+	    * ) err "bad write_file usage";;
+	esac
+    done
+    
+    shift $(($OPTIND - 1))
+    [[ $# -ge 1 ]] || err "write_file - missing path argument"
+    [[ $# -le 2 ]] || err "write_file - too many arguments"
+
+    local path="$1"
+    shift
+
+    # Use temporary to ensure atomic operation on filesystem
+    local tmp="$(mktemp "$path.XXXXXXXXXX")"
+    tmp_list+=("$tmp")
+    cat > "$tmp"
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$path"
+}
+
 get_info() {
     local name="$1"
 
@@ -45,6 +71,7 @@ get_info() {
     p_required=()
     p_config_args=()
     p_executable=""
+    p_extra_scripts_writer=""
     
     unset p_archive_name p_archive_url p_checksum
     case "$name" in
@@ -101,6 +128,8 @@ get_info() {
 		#LIBS=-lncurses
 	    )
 	    p_executable="$name"
+	    p_extra_scripts_writer=write_tmux_extra
+	    
 	    ;;
 
 	screen )
@@ -117,6 +146,7 @@ get_info() {
 		LDFLAGS="-L$install_dir/lib"
 	    )
 	    p_executable="$name"
+	    p_extra_scripts_writer=write_screen_extra
 	    ;;
 
 	* )  err "unknown package name - $name" ;;
@@ -231,13 +261,64 @@ build_source() {
     log "$p_name is successfully built"
 }
 
+write_command_with_service() {
+    local name="$1" service_args="$2" suffix="$3" cmd_args="$4" path
+    shift
+    args="$*"
+    path="$install_dir/bin/$name-$suffix"
+    log "Creating $path"
+    sed -e "s/%NAME%/$name/g" \
+	-e "s/%SERVICE_ARGS%/$service_args/g" \
+	-e "s/%CMD_ARGS%/$cmd_args/g" <<'EOF' \
+	| write_file -m 755 "$path"
+#!/bin/sh
+
+set -e -u
+
+get_service_state() {
+    service_state="$(systemctl show --property=ActiveState "$service")"
+    service_state="${service_state#*=}"
+}
+
+service="%NAME%-$USER"
+dir="$(dirname "$0")"
+get_service_state
+if test active != "$service_state"; then
+    if test inactive = "$service_state" -o failed = "$service_state"; then
+        sudo systemd-run --uid $UID --unit "$service" --service-type=forking \
+            "$dir/%NAME%" %SERVICE_ARGS% 2>/dev/null
+    fi
+    i=0
+    while test $i -lt 20; do
+        get_service_state
+        test activating = "$service_state" || break
+        sleep 0.05
+        i=$(($i + 1))
+    done
+fi
+exec "$dir/%NAME%" %CMD_ARGS%
+EOF
+    printf '%s\n' "$path"
+}
+
+write_screen_extra() {
+    write_command_with_service screen "-d -m" resume "-D -r"
+}
+
+write_tmux_extra() {
+    write_command_with_service tmux "new-session -d" attach attach
+}
+
 print_ready_executables() {
-    local name path
+    local name path script
     for name in "${binaries[@]}"; do
 	get_info "$name"
 	path="$install_dir/bin/$p_executable"
 	if [[ -x "$path" ]]; then
-	    printf "%s\n" "$path"
+	    printf '%s\n' "$path"
+	    if [[ -n "$p_extra_scripts_writer" ]]; then
+		$p_extra_scripts_writer "$install_dir/bin" 
+	    fi
 	fi
     done
 }
@@ -245,16 +326,12 @@ print_ready_executables() {
 run_setup() {
     local dir
 
-    mkdir -p "$build_root"
     for dir in "$archives" "$forest" "$install_dir" "$build_opt_dir" ; do
 	mkdir -p "$dir"
     done
 }
 
 if [[ "$UID" == 0 ]]; then
-    if [[ ! -d /vol ]]; then
-	err "/vol volume to store build binaries does not exist"
-    fi
     if [[ ! -d "$build_root" ]]; then
 	tmp="$(mktemp -d "$build_root.XXXXXXXXXX")"
 	tmp_list+=("$tmp")

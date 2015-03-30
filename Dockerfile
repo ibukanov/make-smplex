@@ -1,31 +1,22 @@
 FROM ubuntu
 
-#FROM fedora
-
-# RUN yum update -y
-
 RUN apt-get update
 
 RUN apt-get install -y gcc make tar curl
 
-# RUN yum install -y gcc make tar curl
-
 RUN apt-get clean
-
-#RUN yum clean all
 
 # Drop suid|sguid
 RUN find / -xdev -perm /6000 -type f -print0 | xargs -0r chmod -6000
 
 RUN groupadd -g 3015 user && \
     useradd -m -d /home/user -u 3015 -g 3015 user && \
-    mkdir -p 755 /build && \
-    chown user:user /build
+    mkdir -p 755 /vol
 
 WORKDIR /home/user
 
-ENTRYPOINT ["/opt/bin/build-statics"]
+ENTRYPOINT ["/opt/build-statics"]
 
-COPY build-statics /opt/bin/
+COPY build-statics /opt/
 
-RUN chmod a+rX -R /opt/bin
+RUN chmod a+rX -R /opt
